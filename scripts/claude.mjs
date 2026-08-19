@@ -4,8 +4,18 @@ import { execFileSync } from 'node:child_process';
 // The reviewer never sees the fixer's reasoning — sharing the fixer's framing is
 // exactly what produces a reviewer with the same blind spot.
 
-const run = (prompt, { cwd, allowedTools }) =>
-  execFileSync('claude', ['-p', prompt, '--allowed-tools', allowedTools.join(','), '--permission-mode', 'acceptEdits'], {
+// --max-turns caps a runaway run. Whether that spend is API billing or
+// subscription quota depends on which credential the workflow supplies
+// (ANTHROPIC_API_KEY vs CLAUDE_CODE_OAUTH_TOKEN); the cap matters either way.
+const MAX_TURNS = { fix: process.env.AUTOFIX_MAX_TURNS ?? '30', review: process.env.REVIEW_MAX_TURNS ?? '15' };
+
+const run = (prompt, { cwd, allowedTools, maxTurns }) =>
+  execFileSync('claude', [
+    '-p', prompt,
+    '--allowed-tools', allowedTools.join(','),
+    '--permission-mode', 'acceptEdits',
+    '--max-turns', maxTurns,
+  ], {
     cwd, encoding: 'utf8', stdio: 'pipe', timeout: 25 * 60 * 1000,
     maxBuffer: 32 * 1024 * 1024,
   });
@@ -37,7 +47,7 @@ ABORT RATHER THAN GUESS. If the stack trace does not resolve to real source (min
 
 When done, output a section headed "ROOT CAUSE:" with 1-3 sentences, then "CHANGES:" listing each file and why. If you aborted, output "ABORTED:" and the reason.`;
 
-  return run(prompt, { cwd, allowedTools: FIX_TOOLS });
+  return run(prompt, { cwd, allowedTools: FIX_TOOLS, maxTurns: MAX_TURNS.fix });
 }
 
 // Adversarial: the reviewer re-derives the cause from the trace alone and is told
@@ -70,7 +80,7 @@ DEFAULT TO REJECTION IF UNSURE. A wrong fix merged automatically is far worse th
 
 Output exactly one line starting "VERDICT: APPROVE" or "VERDICT: REJECT", then a short justification. If you reject, state precisely what would have to change.`;
 
-  return run(prompt, { cwd, allowedTools: REVIEW_TOOLS });
+  return run(prompt, { cwd, allowedTools: REVIEW_TOOLS, maxTurns: MAX_TURNS.review });
 }
 
 export const parseVerdict = (text) => /^VERDICT:\s*APPROVE\b/im.test(text) && !/^VERDICT:\s*REJECT\b/im.test(text);
