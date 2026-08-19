@@ -21,14 +21,14 @@ on:
     secrets:
       SENTRY_AUTH_TOKEN:
         required: true
-      ANTHROPIC_API_KEY:
+      CLAUDE_CODE_OAUTH_TOKEN:
         required: true
       RESEND_API_KEY:
         required: true
 
 env:
   SENTRY_ORG: whatstheplaninc
-  RUNNER_REPO: abigayleh/sentry-autofix
+  RUNNER_REPO: abigayleh/auto-testing
   RUNNER_REF: main
 
 # One autofix at a time per app repo, so two issues can never race on the tree.
@@ -78,6 +78,9 @@ jobs:
         if: steps.firebase.outputs.needed == 'true'
         run: npm i -g firebase-tools@14.2.2
 
+      - name: Install Claude Code
+        run: npm i -g @anthropic-ai/claude-code
+
       - name: Configure git identity
         run: |
           git -C app config user.name "sentry-autofix[bot]"
@@ -88,7 +91,7 @@ jobs:
         run: node "$RUNNER_DIR/scripts/run.mjs"
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SENTRY_PROJECT: ${{ inputs.sentry_project }}
           SENTRY_ISSUE_ID: ${{ inputs.sentry_issue_id }}
