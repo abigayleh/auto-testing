@@ -1,0 +1,116 @@
+name: Sentry Autofix (reusable)
+
+# Called by a thin workflow in each app repo, so the job runs inside that repo
+# under its own GITHUB_TOKEN — no cross-repo PAT anywhere.
+on:
+  workflow_call:
+    inputs:
+      sentry_project:
+        description: Sentry project slug to poll.
+        required: true
+        type: string
+      base_branch:
+        description: Branch the fix branches from and targets.
+        required: true
+        type: string
+      sentry_issue_id:
+        description: Single Sentry issue to fix. Empty on scheduled runs.
+        required: false
+        type: string
+        default: ''
+    secrets:
+      SENTRY_AUTH_TOKEN:
+        required: true
+      ANTHROPIC_API_KEY:
+        required: true
+      RESEND_API_KEY:
+        required: true
+
+env:
+  SENTRY_ORG: whatstheplaninc
+  RUNNER_REPO: abigayleh/sentry-autofix
+  RUNNER_REF: main
+
+# One autofix at a time per app repo, so two issues can never race on the tree.
+concurrency:
+  group: sentry-autofix-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  autofix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out app repo
+        uses: actions/checkout@v4
+        with:
+          path: app
+          fetch-depth: 0
+
+      - name: Check out autofix runner
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.RUNNER_REPO }}
+          ref: ${{ env.RUNNER_REF }}
+          path: runner
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Detect Firebase emulator use
+        id: firebase
+        run: |
+          if [ -f app/firebase.json ]; then echo "needed=true" >> "$GITHUB_OUTPUT"
+          else echo "needed=false" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: actions/setup-java@v4
+        if: steps.firebase.outputs.needed == 'true'
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Pinned: an unpinned emulator CLI is a real flake source.
+      - name: Install Firebase CLI
+        if: steps.firebase.outputs.needed == 'true'
+        run: npm i -g firebase-tools@14.2.2
+
+      - name: Configure git identity
+        run: |
+          git -C app config user.name "sentry-autofix[bot]"
+          git -C app config user.email "sentry-autofix[bot]@users.noreply.github.com"
+
+      - name: Run autofix
+        id: autofix
+        run: node "$RUNNER_DIR/scripts/run.mjs"
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SENTRY_PROJECT: ${{ inputs.sentry_project }}
+          SENTRY_ISSUE_ID: ${{ inputs.sentry_issue_id }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+          APP_REPO: ${{ github.repository }}
+          APP_DIR: ${{ github.workspace }}/app
+          RUNNER_DIR: ${{ github.workspace }}/runner
+          FIREBASE_EMULATORS: ${{ steps.firebase.outputs.needed }}
+          AUTOFIX_SUMMARY_FILE: ${{ github.workspace }}/autofix-summary.json
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+      # Heartbeat: always reached, so an empty poll, a crash and an expired token
+      # are all reported. Silence must never look like a quiet week in production.
+      - name: Notify
+        if: always()
+        run: node "$RUNNER_DIR/scripts/notify.mjs"
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          AUTOFIX_STATUS: ${{ steps.autofix.outcome }}
+          SENTRY_PROJECT: ${{ inputs.sentry_project }}
+          SENTRY_ISSUE_ID: ${{ inputs.sentry_issue_id }}
+          APP_REPO: ${{ github.repository }}
+          RUNNER_DIR: ${{ github.workspace }}/runner
+          AUTOFIX_SUMMARY_FILE: ${{ github.workspace }}/autofix-summary.json
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

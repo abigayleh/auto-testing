@@ -1,0 +1,10 @@
+{
+  "name": "sentry-autofix",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Polls Sentry for production errors, has Claude Code propose and independently review a minimal fix, validates it, and opens a Draft PR.",
+  "scripts": {
+    "test": "node --test scripts/*.test.mjs",
+    "autofix": "node scripts/run.mjs"
+  }
+}
