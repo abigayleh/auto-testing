@@ -83,7 +83,8 @@ the specific risk when both are the same model.
 
 ## Configuration
 
-Secrets: `SENTRY_AUTH_TOKEN` (read-scoped), `ANTHROPIC_API_KEY`, `RESEND_API_KEY`.
+Secrets: `SENTRY_AUTH_TOKEN` (read-scoped), `CLAUDE_CODE_OAUTH_TOKEN` (from
+`claude setup-token` — bills subscription quota, not API credits), `RESEND_API_KEY`.
 Never committed; supplied as repository secrets.
 
 Env: `SENTRY_ORG` (default `whatstheplaninc`), `SENTRY_PROJECT`, `BASE_BRANCH`,

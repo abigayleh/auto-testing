@@ -21,7 +21,7 @@ on:
     secrets:
       SENTRY_AUTH_TOKEN:
         required: true
-      ANTHROPIC_API_KEY:
+      CLAUDE_CODE_OAUTH_TOKEN:
         required: true
       RESEND_API_KEY:
         required: true
@@ -95,7 +95,7 @@ jobs:
         run: node "$RUNNER_DIR/scripts/run.mjs"
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SENTRY_PROJECT: ${{ inputs.sentry_project }}
           SENTRY_ISSUE_ID: ${{ inputs.sentry_issue_id }}

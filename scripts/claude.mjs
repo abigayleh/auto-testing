@@ -4,9 +4,8 @@ import { execFileSync } from 'node:child_process';
 // The reviewer never sees the fixer's reasoning — sharing the fixer's framing is
 // exactly what produces a reviewer with the same blind spot.
 
-// --max-turns caps a runaway run. Whether that spend is API billing or
-// subscription quota depends on which credential the workflow supplies
-// (ANTHROPIC_API_KEY vs CLAUDE_CODE_OAUTH_TOKEN); the cap matters either way.
+// --max-turns caps a runaway run. The workflow authenticates with
+// CLAUDE_CODE_OAUTH_TOKEN, so the cap bounds subscription quota, not billing.
 const MAX_TURNS = { fix: process.env.AUTOFIX_MAX_TURNS ?? '30', review: process.env.REVIEW_MAX_TURNS ?? '15' };
 
 const run = (prompt, { cwd, allowedTools, maxTurns }) =>
