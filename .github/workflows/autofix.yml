@@ -61,6 +61,13 @@ jobs:
         with:
           node-version: '20'
 
+      # Pinned like the emulator CLI. Verified, so a missing binary fails
+      # here rather than halfway through a fix.
+      - name: Install Claude Code
+        run: |
+          npm i -g @anthropic-ai/claude-code@2.1.235
+          claude --version
+
       - name: Detect Firebase emulator use
         id: firebase
         run: |
