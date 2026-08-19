@@ -25,6 +25,8 @@ on:
         required: true
       RESEND_API_KEY:
         required: true
+      ADMIN_NOTIFICATION_EMAIL:
+        required: false
 
 env:
   SENTRY_ORG: whatstheplaninc
@@ -110,6 +112,7 @@ jobs:
         run: node "$RUNNER_DIR/scripts/notify.mjs"
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          ADMIN_NOTIFICATION_EMAIL: ${{ secrets.ADMIN_NOTIFICATION_EMAIL }}
           AUTOFIX_STATUS: ${{ steps.autofix.outcome }}
           SENTRY_PROJECT: ${{ inputs.sentry_project }}
           SENTRY_ISSUE_ID: ${{ inputs.sentry_issue_id }}
