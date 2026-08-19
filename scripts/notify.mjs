@@ -1,6 +1,9 @@
 // Ops notifications for the Sentry autofix pipeline. Plain text over Resend's REST API.
 // Every send returns {sent, reason} and never throws: silence must never look like health.
 
+import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+
 const RESEND_URL = 'https://api.resend.com/emails';
 const RULE = '='.repeat(64);
 
@@ -72,7 +75,10 @@ export function classifyAbort({ stage, reason, detail, kind } = {}) {
 
 export function renderSubject(kind, payload = {}) {
   const repo = payload.repo || 'unknown repo';
-  if (kind === 'heartbeat') return `[autofix] ${repo}: all quiet - ${payload.issuesFound ?? 0} new issues`;
+  if (kind === 'heartbeat') {
+    const n = payload.issuesFound ?? 0;
+    return n > 0 ? `[autofix] ${repo}: run OK - ${n} issues handled` : `[autofix] ${repo}: all quiet - 0 new issues`;
+  }
   const tag = SUBJECT_TAG[kind] || `UNRECOGNISED RESULT (${kind})`;
   if (kind === 'failure') return `[autofix] ${repo}: ${tag}`;
   if (kind === 'fixed') {
@@ -85,10 +91,13 @@ export function renderBody(kind, payload = {}) {
   const { issue, repo = 'unknown repo' } = payload;
   const banner = kind === 'fixed'
     ? (payload.merged ? 'FIXED - PR AUTO-MERGED' : 'FIXED - PR OPEN, WAITING FOR HUMAN REVIEW')
-    : BANNER[kind] || `UNRECOGNISED RESULT (${kind}) - treat this as a pipeline bug`;
+    : kind === 'heartbeat' && (payload.issuesFound ?? 0) > 0
+      ? 'RUN OK - issues were handled, each mailed separately'
+      : BANNER[kind] || `UNRECOGNISED RESULT (${kind}) - treat this as a pipeline bug`;
 
   const head = [RULE, banner, RULE, `Repo:  ${repo}`];
   if (issue) head.push(`Issue: ${issueLabel(issue)}`, `Link:  ${issue.permalink || issue.url || '(no link)'}`);
+  if (payload.runUrl) head.push(`Run:   ${payload.runUrl}`);
   return [...head, '', ...bodyLines(kind, payload), '', FOOTER].join('\n');
 }
 
@@ -148,8 +157,9 @@ function bodyLines(kind, p) {
       `Last run:         ${p.lastRunOk === false ? 'FAILED' : 'OK'}`,
       `Detail:           ${clip(p.detail) || '(none)'}`,
       '',
-      'Nothing needed fixing. This mail exists so that silence is never mistaken for',
-      'health: if these stop arriving, the pipeline itself is broken.',
+      (p.issuesFound ?? 0) > 0
+        ? 'Roll-up only - the per-issue mails carry the detail. This mail exists so that\nsilence is never mistaken for health: if these stop arriving, the pipeline is broken.'
+        : 'Nothing needed fixing. This mail exists so that silence is never mistaken for\nhealth: if these stop arriving, the pipeline itself is broken.',
     ];
   }
   return [`Payload: ${clip(JSON.stringify(p, null, 2))}`];
@@ -217,4 +227,89 @@ export async function guardRun({ repo, stage = 'triage' }, fn) {
     });
     throw err;
   }
+}
+
+// ---- CLI entrypoint: `node scripts/notify.mjs` from the workflow's always() step ----
+
+function readSummary(path) {
+  if (!path) return { error: 'AUTOFIX_SUMMARY_FILE was not set' };
+  try {
+    const data = JSON.parse(readFileSync(path, 'utf8'));
+    if (!data || typeof data !== 'object') return { error: `${path} did not contain a JSON object` };
+    return { data };
+  } catch (err) {
+    return { error: `could not read ${path}: ${err?.message || err}` };
+  }
+}
+
+function rollUp(outcomes) {
+  const counts = {};
+  for (const o of outcomes) {
+    const k = o?.outcome || 'unknown';
+    counts[k] = (counts[k] || 0) + 1;
+  }
+  const tally = Object.entries(counts).map(([k, n]) => `${n} ${k}`).join(', ') || 'nothing handled';
+  const prs = outcomes.map((o) => o?.prUrl).filter(Boolean);
+  return prs.length ? `${tally} | PRs: ${prs.join(', ')}` : tally;
+}
+
+// Decides which mail a finished workflow run deserves. Anything not provably
+// healthy is a failure: an empty status or an unreadable summary is never all-quiet.
+export function classifyRun(env = {}, summary = {}) {
+  const status = String(env.AUTOFIX_STATUS ?? '').trim();
+  if (status === '') {
+    return { kind: 'failure', reason: 'AUTOFIX_STATUS was empty - an earlier workflow step (checkout, setup, install) most likely died before autofix ran' };
+  }
+  if (status !== 'success') {
+    return { kind: 'failure', reason: `the autofix job reported status "${status}"` };
+  }
+  if (summary.error) {
+    return { kind: 'failure', reason: `run reported success but its summary is unusable: ${summary.error}. A run that cannot describe itself is NOT an all-quiet run` };
+  }
+  const data = summary.data || {};
+  if (data.ok === false) {
+    return { kind: 'failure', reason: `summary reports ok:false - ${data.reason || data.error || 'no reason given'}` };
+  }
+  const outcomes = Array.isArray(data.outcomes) ? data.outcomes : [];
+  return { kind: 'heartbeat', outcomes, data };
+}
+
+export async function runCli(env = process.env, opts = {}) {
+  const repo = env.APP_REPO || env.SENTRY_PROJECT || 'unknown repo';
+  const summary = readSummary(env.AUTOFIX_SUMMARY_FILE);
+  const verdict = classifyRun(env, summary);
+  const mode = env.SENTRY_ISSUE_ID ? `manual run for issue ${env.SENTRY_ISSUE_ID}` : 'scheduled poll';
+  const project = summary.data?.project || env.SENTRY_PROJECT || 'unknown project';
+
+  let result;
+  if (verdict.kind === 'failure') {
+    result = await sendAborted({
+      repo,
+      stage: 'triage',
+      kind: 'failure',
+      runUrl: env.RUN_URL,
+      reason: verdict.reason,
+      detail: [`Mode: ${mode}`, `Project: ${project}`, `AUTOFIX_STATUS: "${env.AUTOFIX_STATUS ?? ''}"`, `Summary file: ${env.AUTOFIX_SUMMARY_FILE || '(unset)'}`].join('\n'),
+    }, opts);
+  } else {
+    const polled = verdict.data.polled ?? verdict.outcomes.length;
+    result = await sendHeartbeat({
+      repo,
+      issuesFound: verdict.outcomes.length,
+      lastRunOk: true,
+      runUrl: env.RUN_URL,
+      detail: [`Mode: ${mode}`, `Project: ${project}`, `Issues polled: ${polled}`, `Outcomes: ${rollUp(verdict.outcomes)}`].join('\n'),
+    }, opts);
+  }
+
+  // Red build on a failed run, and also when we could not mail at all - an
+  // unsent notification is the silent failure this whole module exists to stop.
+  const exitCode = verdict.kind === 'failure' || !result.sent ? 1 : 0;
+  if (!result.sent) console.error(`[notify] job marked failed because the notification could not be sent: ${result.reason}`);
+  return { ...result, exitCode };
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const { exitCode } = await runCli();
+  process.exitCode = exitCode;
 }

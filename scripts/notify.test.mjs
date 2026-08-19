@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
-  classifyAbort, escapeHtml, renderBody, renderSubject,
+  classifyAbort, classifyRun, escapeHtml, renderBody, renderSubject, runCli,
   sendAborted, sendFixOpened, sendHeartbeat,
 } from './notify.mjs';
 
@@ -162,4 +167,141 @@ test('interpolated error text is escaped in the html part', async () => {
   assert.doesNotMatch(body.html, /<script>/);
   assert.match(body.html, /&lt;script&gt;/);
   assert.equal(escapeHtml(`<a href="x">&'`), '&lt;a href=&quot;x&quot;&gt;&amp;&#39;');
+});
+
+// ---- CLI entrypoint ----
+
+const NOTIFY = fileURLToPath(new URL('./notify.mjs', import.meta.url));
+const CI_ENV = { APP_REPO: 'acme/web', SENTRY_PROJECT: 'whats-for-dinner', RUN_URL: 'https://gh/run/9' };
+
+function summaryFile(t, contents) {
+  const dir = mkdtempSync(join(tmpdir(), 'notify-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, 'summary.json');
+  writeFileSync(path, typeof contents === 'string' ? contents : JSON.stringify(contents));
+  return path;
+}
+
+// Runs the CLI with a stub fetch and a valid Resend env; returns {res, calls}.
+async function cli(env) {
+  const calls = [];
+  const res = await withEnv({ RESEND_API_KEY: 'k', ADMIN_NOTIFICATION_EMAIL: 'ops@acme.dev' }, () =>
+    runCli(env, { fetch: stubFetch(calls) }),
+  );
+  return { res, calls, body: calls.length ? JSON.parse(calls[0].init.body) : null };
+}
+
+test('CLI: empty AUTOFIX_STATUS is a failure, never all-quiet', async (t) => {
+  const path = summaryFile(t, { ok: true, outcomes: [] });
+  const { res, body } = await cli({ ...CI_ENV, AUTOFIX_STATUS: '', AUTOFIX_SUMMARY_FILE: path });
+  assert.equal(res.kind, 'failure');
+  assert.equal(res.exitCode, 1);
+  assert.match(res.subject, /PIPELINE FAILURE/);
+  assert.match(body.text, /AUTOFIX_STATUS was empty/);
+  assert.match(body.text, /earlier workflow step/);
+  assert.doesNotMatch(res.subject, /all quiet/i);
+});
+
+test('CLI: absent, whitespace and unknown AUTOFIX_STATUS all fail', async (t) => {
+  const path = summaryFile(t, { ok: true, outcomes: [] });
+  for (const status of [undefined, '   ', 'failure', 'skipped', 'cancelled']) {
+    const { res } = await cli({ ...CI_ENV, AUTOFIX_STATUS: status, AUTOFIX_SUMMARY_FILE: path });
+    assert.equal(res.kind, 'failure', `status ${JSON.stringify(status)} should fail`);
+    assert.equal(res.exitCode, 1);
+  }
+});
+
+test('CLI: missing or unparseable summary is a failure', async (t) => {
+  const missing = await cli({ ...CI_ENV, AUTOFIX_STATUS: 'success', AUTOFIX_SUMMARY_FILE: '/nope/summary.json' });
+  assert.equal(missing.res.kind, 'failure');
+  assert.equal(missing.res.exitCode, 1);
+  assert.match(missing.body.text, /summary is unusable/);
+  assert.match(missing.body.text, /NOT an all-quiet run/);
+
+  const unset = await cli({ ...CI_ENV, AUTOFIX_STATUS: 'success' });
+  assert.equal(unset.res.kind, 'failure');
+
+  const garbage = await cli({ ...CI_ENV, AUTOFIX_STATUS: 'success', AUTOFIX_SUMMARY_FILE: summaryFile(t, '{not json') });
+  assert.equal(garbage.res.kind, 'failure');
+  assert.match(garbage.body.text, /could not read/);
+});
+
+test('CLI: summary with ok:false is a failure', async (t) => {
+  const path = summaryFile(t, { ok: false, reason: 'Sentry token expired' });
+  const { res, body } = await cli({ ...CI_ENV, AUTOFIX_STATUS: 'success', AUTOFIX_SUMMARY_FILE: path });
+  assert.equal(res.kind, 'failure');
+  assert.match(body.text, /Sentry token expired/);
+});
+
+test('CLI: zero-issue success sends the heartbeat and exits 0', async (t) => {
+  const path = summaryFile(t, { ok: true, project: 'whats-for-dinner', polled: 3, outcomes: [] });
+  const { res, body } = await cli({ ...CI_ENV, AUTOFIX_STATUS: 'success', AUTOFIX_SUMMARY_FILE: path });
+  assert.equal(res.kind, 'heartbeat');
+  assert.equal(res.exitCode, 0);
+  assert.match(res.subject, /all quiet - 0 new issues/);
+  assert.match(body.text, /Issues polled: 3/);
+  assert.match(body.text, /scheduled poll/);
+  assert.match(body.text, /https:\/\/gh\/run\/9/);
+});
+
+test('CLI: success with issues is a one-line roll-up, not a duplicate of the per-issue mail', async (t) => {
+  const path = summaryFile(t, {
+    ok: true, project: 'whats-for-dinner', polled: 2,
+    outcomes: [
+      { outcome: 'fixed', issue, prUrl: 'https://gh/pr/1', merged: true },
+      { outcome: 'inconclusive', issue, reason: 'emulator timed out' },
+    ],
+  });
+  const { res, body } = await cli({ ...CI_ENV, AUTOFIX_STATUS: 'success', AUTOFIX_SUMMARY_FILE: path, SENTRY_ISSUE_ID: 'APP-7Q' });
+  assert.equal(res.kind, 'heartbeat');
+  assert.equal(res.exitCode, 0);
+  assert.match(res.subject, /run OK - 2 issues handled/);
+  assert.match(body.text, /1 fixed, 1 inconclusive/);
+  assert.match(body.text, /manual run for issue APP-7Q/);
+  assert.doesNotMatch(body.text, /Root cause|BLOCKED BY/);
+});
+
+test('CLI: malformed outcomes and absent fields do not crash the notifier', async (t) => {
+  const path = summaryFile(t, { ok: true, outcomes: [{}, null, { outcome: 'skipped' }] });
+  const { res } = await cli({ ...CI_ENV, AUTOFIX_STATUS: 'success', AUTOFIX_SUMMARY_FILE: path });
+  assert.equal(res.kind, 'heartbeat');
+  assert.match(res.subject, /3 issues handled/);
+});
+
+test('classifyRun treats only a provably healthy run as a heartbeat', () => {
+  assert.equal(classifyRun({ AUTOFIX_STATUS: '' }, {}).kind, 'failure');
+  assert.equal(classifyRun({}, {}).kind, 'failure');
+  assert.equal(classifyRun({ AUTOFIX_STATUS: 'success' }, { error: 'gone' }).kind, 'failure');
+  assert.equal(classifyRun({ AUTOFIX_STATUS: 'success' }, { data: { ok: true } }).kind, 'heartbeat');
+});
+
+test('CLI: an unsendable notification still turns the job red', async (t) => {
+  const path = summaryFile(t, { ok: true, outcomes: [] });
+  const res = await withEnv({ RESEND_API_KEY: undefined, ADMIN_NOTIFICATION_EMAIL: 'ops@acme.dev' }, () =>
+    runCli({ ...CI_ENV, AUTOFIX_STATUS: 'success', AUTOFIX_SUMMARY_FILE: path }),
+  );
+  assert.equal(res.kind, 'heartbeat');
+  assert.equal(res.sent, false);
+  assert.equal(res.exitCode, 1);
+});
+
+const run = (args, env) =>
+  new Promise((resolve) => {
+    execFile(process.execPath, args, { env: { PATH: process.env.PATH, ...env }, timeout: 15000 }, (err, stdout, stderr) =>
+      resolve({ code: err?.code ?? 0, stdout, stderr }),
+    );
+  });
+
+test('run as a script: it actually notifies and exits non-zero', async () => {
+  const { code, stderr } = await run([NOTIFY], { AUTOFIX_STATUS: '', APP_REPO: 'acme/web' });
+  assert.equal(code, 1);
+  assert.match(stderr, /EMAIL NOT SENT/);
+  assert.match(stderr, /PIPELINE FAILURE/);
+});
+
+test('imported as a module: no side effects, no mail', async () => {
+  const { code, stdout, stderr } = await run(['--input-type=module', '-e', `await import(${JSON.stringify(NOTIFY)});`], { AUTOFIX_STATUS: '' });
+  assert.equal(code, 0);
+  assert.equal(stdout.trim(), '');
+  assert.equal(stderr.trim(), '');
 });
