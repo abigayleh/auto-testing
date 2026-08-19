@@ -1,4 +1,4 @@
-name: Sentry Autofix (reusable)
+name: Auto Testing (reusable)
 
 # Called by a thin workflow in each app repo, so the job runs inside that repo
 # under its own GITHUB_TOKEN — no cross-repo PAT anywhere.
@@ -28,12 +28,12 @@ on:
 
 env:
   SENTRY_ORG: whatstheplaninc
-  RUNNER_REPO: abigayleh/sentry-autofix
+  RUNNER_REPO: abigayleh/auto-testing
   RUNNER_REF: main
 
 # One autofix at a time per app repo, so two issues can never race on the tree.
 concurrency:
-  group: sentry-autofix-${{ github.repository }}
+  group: auto-testing-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
@@ -80,8 +80,8 @@ jobs:
 
       - name: Configure git identity
         run: |
-          git -C app config user.name "sentry-autofix[bot]"
-          git -C app config user.email "sentry-autofix[bot]@users.noreply.github.com"
+          git -C app config user.name "auto-testing[bot]"
+          git -C app config user.email "auto-testing[bot]@users.noreply.github.com"
 
       - name: Run autofix
         id: autofix

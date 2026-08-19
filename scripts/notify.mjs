@@ -26,7 +26,7 @@ const SUBJECT_TAG = {
   failure: 'PIPELINE FAILURE - autofix is not running',
 };
 
-const FOOTER = 'sentry-autofix - you get this mail on every run, including quiet ones.';
+const FOOTER = 'auto-testing - you get this mail on every run, including quiet ones.';
 
 export function escapeHtml(s) {
   const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };

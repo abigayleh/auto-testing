@@ -1,4 +1,4 @@
-# sentry-autofix
+# auto-testing
 
 Polls Sentry for new production errors, has Claude Code propose a minimal fix and a
 second, adversarial Claude Code pass try to refute it, runs the repo's own tests,
